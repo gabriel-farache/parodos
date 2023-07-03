@@ -1,5 +1,7 @@
 package com.redhat.parodos.workflow.execution.service;
 
+import java.util.concurrent.Future;
+
 import java.util.Optional;
 
 import com.redhat.parodos.workflow.WorkFlowDelegate;
@@ -12,6 +14,7 @@ import com.redhat.parodos.workflows.work.WorkStatus;
 import com.redhat.parodos.workflows.workflow.WorkFlow;
 import lombok.extern.slf4j.Slf4j;
 
+import org.springframework.scheduling.annotation.AsyncResult;
 import org.springframework.stereotype.Service;
 
 @Slf4j
@@ -28,18 +31,20 @@ public class WorkFlowExecutorImpl implements WorkFlowExecutor {
 	}
 
 	@Override
-	public void execute(ExecutionContext context, WorkFlowService workFlowService) {
+	public Future<Boolean> execute(ExecutionContext context, WorkFlowService workFlowService) {
 		WorkFlow workFlow = workFlowDelegate.getWorkFlowByName(context.workFlowName());
 		log.info("Execute workflow {} (ID: {})", context.workFlowName(), context.executionId());
 		WorkContextUtils.updateWorkContextPartially(context.workContext(), context.projectId(), context.userId(),
 				context.workFlowName(), context.executionId());
 		WorkReport report = WorkFlowEngineBuilder.aNewWorkFlowEngine().build().run(workFlow, context.workContext());
 		log.info("Work report for {} (ID: {}): {}", context.workFlowName(), context.executionId(), report);
-		if (isFallbackExecutionNeeded(context)) {
+		boolean failed = isFallbackExecutionNeeded(context);
+		if (failed) {
 			log.error("Workflow {} (ID: {}) failed. Check the logs for errors coming from the tasks in this workflow.",
 					context.workFlowName(), context.executionId());
 			executeFallbackWorkFlowIfNeeded(context, workFlowService);
 		}
+	return new AsyncResult<>(!failed);
 	}
 
 	private void executeFallbackWorkFlowIfNeeded(ExecutionContext context, WorkFlowService workFlowService) {
