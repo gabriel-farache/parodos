@@ -29,6 +29,7 @@ JAVA_VERSION := $(shell java --version | awk 'NR==1 { split($$2, ver, "."); prin
 JAVA_VERSION_MAX_SUPPORTED=17
 JAVA_VERSION_MIN_SUPPORTED=17
 
+CLAIR_TMP_DIR ?= $(shell mktemp -d)
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # This is a requirement for 'setup-envtest.sh' in the test target.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -146,6 +147,47 @@ tag-images: ## Tag docker images with git hash and branch name
 
 	$(DOCKER) tag docker-compose_workflow-service:latest $(ORG)$(WORKFLOW_SERVICE_IMAGE):$(GIT_BRANCH)
 	$(DOCKER) tag docker-compose_notification-service:latest $(ORG)$(NOTIFICATION_SERVICE_IMAGE):$(GIT_BRANCH)
+
+deploy-clair:
+	#$(DOCKER) run -d -p 5000:5000 --restart=always --name registry registry:2
+	#$(DOCKER) tag docker-compose_workflow-service:latest localhost:5000/docker-compose_workflow-service:latest
+	#$(DOCKER) tag docker-compose_notification-service:latest localhost:5000/docker-compose_notification-service:latest
+	#$(DOCKER) push  localhost:5000/docker-compose_workflow-service:latest
+	#$(DOCKER) push  localhost:5000/docker-compose_notification-service:latest
+
+	#cd $(CLAIR_TMP_DIR) ;	git clone git@github.com:quay/clair.git ;	cd clair; $(DOCKER) compose up -d
+	#sleep 15m
+	@echo "Clair is up and running"
+
+run-images-analysis:
+	$(eval BRIDGE=$(shell docker network inspect -f '{{json .IPAM.Config}}' bridge | jq -r .[].Gateway))
+	clairctl -config hack/clair/config.yaml report -o json $(BRIDGE):5000/docker-compose_notification-service:latest   | jq .vulnerabilities > $(CLAIR_TMP_DIR)/docker-compose_notification-service_report.json
+	clairctl -config hack/clair/config.yaml report -o json $(BRIDGE):5000/docker-compose_workflow-service:latest   | jq .vulnerabilities > $(CLAIR_TMP_DIR)/docker-compose_workflow-service_report.json
+
+.SILENT: analyse-images
+analyse-images: deploy-clair run-images-analysis
+	$(eval CRITICAL_NOTIFICATION?=$(shell cat $(CLAIR_TMP_DIR)/docker-compose_notification-service_report.json | grep "\"normalized_severity\": \"Critical\"" | wc -l))
+	$(eval HIGH_NOTIFICATION?=$(shell cat $(CLAIR_TMP_DIR)/docker-compose_notification-service_report.json | grep "\"normalized_severity\": \"High\"" | wc -l))
+	$(eval CRITICAL_WORKFLOW?=$(shell cat $(CLAIR_TMP_DIR)/docker-compose_workflow-service_report.json | grep "\"normalized_severity\": \"Critical\"" | wc -l))
+	$(eval HIGH_WORKFLOW?=$(shell cat $(CLAIR_TMP_DIR)/docker-compose_workflow-service_report.json | grep "\"normalized_severity\": \"High\"" | wc -l))
+	@echo -e "Notification service: \n\t$(CRITICAL_NOTIFICATION) critical issues found\n\t$(HIGH_NOTIFICATION) high issues found\n\
+ Workflow service:\n\t$(CRITICAL_WORKFLOW) critical issues found\n\t$(HIGH_WORKFLOW) high issues found\n"
+	if [ ${CRITICAL_NOTIFICATION} -gt 0 ] ; then \
+		echo "$(CRITICAL_NOTIFICATION) critical issues found for notification service" ; \
+		exit 1 ; \
+	elif [ ${CRITICAL_WORKFLOW} -gt 0 ] ; then \
+		echo "$(CRITICAL_WORKFLOW) critical issues found for workflow service" ; \
+		exit 1 ; \
+	elif [ ${HIGH_NOTIFICATION} -gt 0 ] ; then \
+		echo "$(HIGH_NOTIFICATION) high issues found for notification service" ; \
+		exit 1 ; \
+	elif [ ${HIGH_WORKFLOW} -gt 0 ] ; then \
+		echo "$(HIGH_WORKFLOW) high issues found for workflow service" ; \
+		exit 1 ; \
+	fi
+	#$(DOCKER) stop registry
+	#$(DOCKER) rm registry
+	#map({severity: .normalized_severity}) | group_by(.severity) | map({severity: .[0].severity, Count: length}) | .[] | select( .severity == "Critical" )  | .Count
 
 push-images: ## Push docker images to quay.io registry
 	$(eval TAG?=$(GIT_HASH))
